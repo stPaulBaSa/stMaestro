@@ -51,3 +51,4 @@ Built with ❤️ by Mobile.dev
 [good first issues]: https://github.com/mobile-dev-inc/maestro/issues?q=is%3Aopen+is%3Aissue+label%3A%22good+first+issue%22
 [blogpost]: https://blog.mobile.dev/introducing-maestro-painless-mobile-ui-automation-bee4992d13c1
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/stPaulBaSa/stMaestro)

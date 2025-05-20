@@ -37,6 +37,7 @@ import maestro.utils.CliInsights
 import org.slf4j.LoggerFactory
 import java.util.IdentityHashMap
 import maestro.cli.util.ScreenshotUtils
+import maestro.drivers.AppiumDriver
 import maestro.utils.Insight
 
 /**
