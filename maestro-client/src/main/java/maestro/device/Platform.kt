@@ -2,6 +2,7 @@ package maestro.device
 
 enum class Platform(val description: String) {
     ANDROID("Android"),
+    APPIUM("Appium"),
     IOS("iOS"),
     WEB("Web");
 

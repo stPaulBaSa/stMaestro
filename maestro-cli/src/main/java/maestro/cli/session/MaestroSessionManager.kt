@@ -19,6 +19,9 @@
 
 package maestro.cli.session
 
+import com.google.gson.JsonElement
+import com.google.gson.JsonObject
+import com.google.gson.JsonParser
 import dadb.Dadb
 import dadb.adbserver.AdbServer
 import ios.LocalIOSDevice
@@ -35,6 +38,7 @@ import maestro.device.Platform
 import maestro.utils.CliInsights
 import maestro.cli.util.ScreenReporter
 import maestro.drivers.AndroidDriver
+import maestro.drivers.AppiumDriver
 import maestro.drivers.IOSDriver
 import org.slf4j.LoggerFactory
 import util.IOSDeviceType
@@ -44,6 +48,9 @@ import xcuitest.XCTestDriverClient
 import xcuitest.installer.Context
 import xcuitest.installer.LocalXCTestInstaller
 import xcuitest.installer.LocalXCTestInstaller.*
+import org.openqa.selenium.remote.DesiredCapabilities
+import java.io.File
+import java.net.URL
 import java.nio.file.Paths
 import java.util.UUID
 import java.util.concurrent.Executors
@@ -144,7 +151,8 @@ object MaestroSessionManager {
         }
 
         if (host == null) {
-            val device = PickDeviceInteractor.pickDevice(deviceId, driverHostPort, platform, deviceIndex)
+            val device =
+                PickDeviceInteractor.pickDevice(deviceId, driverHostPort, platform, deviceIndex)
 
             if (device.deviceType == Device.DeviceType.REAL && device.platform == Platform.IOS) {
                 PrintUtils.message("Detected connected iPhone with ${device.instanceId}!")
@@ -198,6 +206,12 @@ object MaestroSessionManager {
             selectedDevice.device != null -> MaestroSession(
                 maestro = when (selectedDevice.device.platform) {
                     Platform.ANDROID -> createAndroid(
+                        selectedDevice.device.instanceId,
+                        !connectToExistingSession,
+                        driverHostPort,
+                    )
+
+                    Platform.APPIUM -> createAppium(
                         selectedDevice.device.instanceId,
                         !connectToExistingSession,
                         driverHostPort,
@@ -332,6 +346,76 @@ object MaestroSessionManager {
         )
     }
 
+    private fun createAppium(
+        instanceId: String,
+        openDriver: Boolean,
+        driverHostPort: Int?,
+    ): Maestro {
+        val userName: String = System.getenv("LT_USERNAME")
+        val accessKey: String = System.getenv("LT_ACCESS_KEY")
+
+        val hub = URL("https://${userName}:${accessKey}@mobile-hub.lambdatest.com/wd/hub")
+
+        val userDir = System.getProperty("user.dir")
+        val pathFile = "$userDir/.maestro/AppiumCapabilities.json"
+        val jsonString = File(pathFile).readText()
+        val appiumCaps: JsonObject = JsonParser.parseString(jsonString) as JsonObject
+        val capsDevices = appiumCaps.remove("devices")
+        val enabledDevices =
+            capsDevices.asJsonArray.filter { it.asJsonObject.get("enabled").asBoolean }
+
+        val commonCaps =
+            appiumCaps.asMap().mapValues { (_, value) -> value.toString().removeSurrounding("\"") }
+
+        val device: JsonElement? = enabledDevices.find {
+            val platformName = it.asJsonObject.get("platformName").asString
+            val deviceName = it.asJsonObject.get("deviceName").asString
+            val platformVersion = it.asJsonObject.get("platformVersion").asString
+            val cInstanceId = "$platformName, $deviceName, $platformVersion"
+            cInstanceId == instanceId
+        }
+        val deviceCaps = device?.asJsonObject?.asMap()
+            ?.mapValues { (_, value) -> value.toString().removeSurrounding("\"") }
+
+        val capabilities = DesiredCapabilities()
+        val ltOptions = HashMap<String, Any>()
+        ltOptions.putAll(commonCaps)
+        ltOptions.putAll(deviceCaps!!)
+
+//        ltOptions["build"] = "Maestro + LambdaTest"
+//        ltOptions["name"] = "Sample Test Maestro Framework"
+//        ltOptions["app"] = "lt://APP1016019351747680796592878"
+
+        ltOptions["build"] = System.getenv("LT_BUILD_NAME")
+        ltOptions["name"] = System.getenv("LT_TEST_NAME")
+        if (device.asJsonObject.get("platformName").asString.lowercase() == "ios") {
+            ltOptions["app"] = System.getenv("LT_IOS_APP")
+        } else if (device.asJsonObject.get("platformName").asString.lowercase() == "android") {
+            ltOptions["app"] = System.getenv("LT_ANDROID_APP")
+        } else {
+            throw IllegalArgumentException("Unsupported platform")
+        }
+
+        capabilities.setCapability("lt:options", ltOptions)
+
+        val platform = ltOptions["platformName"].toString().lowercase()
+        val appiumDriver =
+            if (platform == "ios") io.appium.java_client.ios.IOSDriver(
+                hub,
+                capabilities
+            ) else io.appium.java_client.android.AndroidDriver(hub, capabilities)
+
+        val driver = AppiumDriver(
+            appiumDriver = appiumDriver,
+            emulatorName = instanceId,
+        )
+
+        return Maestro.appium(
+            driver = driver,
+            openDriver = openDriver,
+        )
+    }
+
     private fun createIOS(
         deviceId: String,
         openDriver: Boolean,
@@ -351,7 +435,8 @@ object MaestroSessionManager {
         val iOSDriverConfig = when (deviceType) {
             Device.DeviceType.REAL -> {
                 val maestroDirectory = Paths.get(System.getProperty("user.home"), ".maestro")
-                val driverPath = maestroDirectory.resolve("maestro-iphoneos-driver-build").resolve("driver-iphoneos")
+                val driverPath = maestroDirectory.resolve("maestro-iphoneos-driver-build")
+                    .resolve("driver-iphoneos")
                     .resolve("Build").resolve("Products")
                 IOSDriverConfig(
                     prebuiltRunner = false,
@@ -359,13 +444,15 @@ object MaestroSessionManager {
                     context = Context.CLI
                 )
             }
+
             Device.DeviceType.SIMULATOR -> {
                 IOSDriverConfig(
                     prebuiltRunner = prebuiltRunner,
-                    sourceDirectory =  "driver-iPhoneSimulator",
+                    sourceDirectory = "driver-iPhoneSimulator",
                     context = Context.CLI
                 )
             }
+
             else -> throw UnsupportedOperationException("Unsupported device type $deviceType for iOS platform")
         }
 
@@ -375,12 +462,14 @@ object MaestroSessionManager {
                 val deviceCtlDevice = DeviceControlIOSDevice(deviceId = device.identifier)
                 deviceCtlDevice
             }
+
             Device.DeviceType.SIMULATOR -> {
                 val simctlIOSDevice = SimctlIOSDevice(
                     deviceId = deviceId,
                 )
                 simctlIOSDevice
             }
+
             else -> throw UnsupportedOperationException("Unsupported device type $deviceType for iOS platform")
         }
 

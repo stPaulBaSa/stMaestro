@@ -28,6 +28,7 @@ import java.nio.file.Path
 import kotlin.system.measureTimeMillis
 import kotlin.time.Duration.Companion.seconds
 import maestro.cli.util.ScreenshotUtils
+import maestro.drivers.AppiumDriver
 import maestro.orchestra.util.Env.withDefaultEnvVars
 import maestro.orchestra.util.Env.withInjectedShellEnvVars
 
@@ -103,6 +104,10 @@ class TestSuiteInteractor(
 
 
         val suiteDuration = flowResults.sumOf { it.duration?.inWholeSeconds ?: 0 }.seconds
+
+        if (maestro.driver is AppiumDriver){
+            maestro.close()
+        }
 
         TestSuiteStatusView.showSuiteResult(
             TestSuiteViewModel(
@@ -201,7 +206,11 @@ class TestSuiteInteractor(
                             it.error = e
                         }
 
-                        ScreenshotUtils.takeDebugScreenshot(maestro, debugOutput, CommandStatus.FAILED)
+                        ScreenshotUtils.takeDebugScreenshot(
+                            maestro,
+                            debugOutput,
+                            CommandStatus.FAILED
+                        )
                         Orchestra.ErrorResolution.FAIL
                     },
                     onCommandSkipped = { _, command ->
@@ -269,7 +278,8 @@ class TestSuiteInteractor(
                 status = flowStatus,
                 failure = if (flowStatus == FlowStatus.ERROR) {
                     TestExecutionSummary.Failure(
-                        message = shardPrefix + (errorMessage ?: debugOutput.exception?.message ?: "Unknown error"),
+                        message = shardPrefix + (errorMessage ?: debugOutput.exception?.message
+                        ?: "Unknown error"),
                     )
                 } else null,
                 duration = flowDuration,
