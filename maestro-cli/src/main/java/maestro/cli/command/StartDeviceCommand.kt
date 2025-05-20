@@ -86,6 +86,7 @@ class StartDeviceCommand : Callable<Int> {
 
         val maestroPlatform = when(p) {
             Platform.ANDROID -> maestro.Platform.ANDROID
+            Platform.APPIUM -> maestro.Platform.APPIUM
             Platform.IOS -> maestro.Platform.IOS
             Platform.WEB -> maestro.Platform.WEB
         }

@@ -607,6 +607,13 @@ class Maestro(
             return Maestro(driver)
         }
 
+        fun appium(driver: Driver, openDriver: Boolean = true): Maestro {
+            if (openDriver) {
+                driver.open()
+            }
+            return Maestro(driver)
+        }
+
         fun web(
             isStudio: Boolean,
             isHeadless: Boolean,

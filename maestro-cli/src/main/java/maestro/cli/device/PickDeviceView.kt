@@ -3,6 +3,7 @@ package maestro.cli.device
 import maestro.cli.CliError
 import maestro.cli.model.DeviceStartOptions
 import maestro.cli.util.DeviceConfigAndroid
+import maestro.cli.util.DeviceConfigAppium
 import maestro.cli.util.DeviceConfigIos
 import maestro.cli.util.PrintUtils
 import maestro.device.Device
@@ -47,6 +48,11 @@ object PickDeviceView {
                 Platform.ANDROID -> {
                     PrintUtils.message("Please specify Android version ${DeviceConfigAndroid.versions}: Press ENTER for default (${DeviceConfigAndroid.defaultVersion})")
                     readlnOrNull()?.toIntOrNull() ?: DeviceConfigAndroid.defaultVersion
+                }
+
+                Platform.APPIUM -> {
+                    PrintUtils.message("Please specify platform version ${DeviceConfigAppium.versions}: Press ENTER for default (${DeviceConfigAppium.defaultVersion})")
+                    readlnOrNull()?.toIntOrNull() ?: DeviceConfigAppium.defaultVersion
                 }
 
                 Platform.WEB -> 0

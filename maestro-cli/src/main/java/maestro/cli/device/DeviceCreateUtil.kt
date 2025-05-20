@@ -19,6 +19,7 @@ internal object DeviceCreateUtil {
         shardIndex: Int? = null,
     ): Device.AvailableForLaunch = when (platform) {
         Platform.ANDROID -> getOrCreateAndroidDevice(osVersion, language, country, forceCreate, shardIndex)
+        Platform.APPIUM -> getOrCreateAppiumDevice(osVersion, language, country, forceCreate, shardIndex)
         Platform.IOS -> getOrCreateIosDevice(osVersion, language, country, forceCreate, shardIndex)
         else -> throw CliError("Unsupported platform $platform. Please specify one of: android, ios")
     }
@@ -165,6 +166,91 @@ internal object DeviceCreateUtil {
             modelId = deviceLaunchId,
             description = deviceLaunchId,
             platform = Platform.ANDROID,
+            language = language,
+            country = country,
+            deviceType = Device.DeviceType.EMULATOR,
+        )
+    }
+
+
+    private fun getOrCreateAppiumDevice(
+        version: Int?, language: String?, country: String?, forceCreate: Boolean, shardIndex: Int? = null
+    ): Device.AvailableForLaunch {
+        @Suppress("NAME_SHADOWING") val version = version ?: DeviceConfigAppium.defaultVersion
+        if (version !in DeviceConfigAppium.versions) {
+            throw CliError("Provided Appium version is not supported. Please use one of ${DeviceConfigAppium.versions}")
+        }
+
+        val architecture = EnvUtils.getMacOSArchitecture()
+        val pixels = DeviceService.getAvailablePixelDevices()
+        val pixel = DeviceConfigAndroid.choosePixelDevice(pixels) ?: AvdDevice("-1", "Pixel 6", "pixel_6")
+
+        val config = try {
+            DeviceConfigAndroid.createConfig(version, pixel, architecture)
+        } catch (e: IllegalStateException) {
+            throw CliError(e.message ?: "Unable to create android device config")
+        }
+
+        val systemImage = config.systemImage
+        val deviceName = config.deviceName + shardIndex?.let { "_${it + 1}" }.orEmpty()
+
+        // check connected device
+        if (DeviceService.isDeviceConnected(deviceName, Platform.APPIUM) != null && shardIndex == null && !forceCreate)
+            throw CliError("A device with name $deviceName is already connected")
+
+        // existing device
+        val existingDevice =
+            if (forceCreate) null
+            else DeviceService.isDeviceAvailableToLaunch(deviceName, Platform.APPIUM)?.modelId
+
+        // dependencies
+        if (existingDevice == null && !DeviceService.isAndroidSystemImageInstalled(systemImage)) {
+            PrintUtils.err("The required system image $systemImage is not installed.")
+
+            PrintUtils.message("Would you like to install it? y/n")
+            val r = readlnOrNull()?.lowercase()
+            if (r == "y" || r == "yes") {
+                PrintUtils.message("Attempting to install $systemImage via Android SDK Manager...\n")
+                if (!DeviceService.installAndroidSystemImage(systemImage)) {
+                    val message = """
+                        Unable to install required dependencies. You can install the system image manually by running this command:
+                        ${DeviceService.getAndroidSystemImageInstallCommand(systemImage)}
+                    """.trimIndent()
+                    throw CliError(message)
+                }
+            } else {
+                val message = """
+                    To install the system image manually, you can run this command:
+                    ${DeviceService.getAndroidSystemImageInstallCommand(systemImage)}
+                """.trimIndent()
+                throw CliError(message)
+            }
+        }
+
+        if (existingDevice != null) PrintUtils.message("Using existing device $deviceName.")
+        else PrintUtils.message("Attempting to create Appium device: $deviceName ")
+
+        val deviceLaunchId = try {
+            // TODO: to be implemented with lambdaTest
+            existingDevice ?: DeviceService.createAndroidDevice(
+                deviceName = config.deviceName,
+                device = config.device,
+                systemImage = config.systemImage,
+                tag = config.tag,
+                abi = config.abi,
+                force = forceCreate,
+                shardIndex = shardIndex,
+            )
+        } catch (e: IllegalStateException) {
+            throw CliError("${e.message}")
+        }
+
+        if (existingDevice == null) PrintUtils.message("Created Android emulator: $deviceName ($systemImage)")
+
+        return Device.AvailableForLaunch(
+            modelId = deviceLaunchId,
+            description = deviceLaunchId,
+            platform = Platform.APPIUM,
             language = language,
             country = country,
             deviceType = Device.DeviceType.EMULATOR,

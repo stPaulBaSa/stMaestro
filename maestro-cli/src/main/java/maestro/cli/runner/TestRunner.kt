@@ -18,6 +18,7 @@ import maestro.cli.runner.resultview.UiState
 import maestro.cli.util.EnvUtils
 import maestro.cli.util.PrintUtils
 import maestro.cli.view.ErrorViewUtils
+import maestro.drivers.AppiumDriver
 import maestro.orchestra.MaestroCommand
 import maestro.orchestra.util.Env.withEnv
 import maestro.orchestra.util.Env.withDefaultEnvVars
@@ -56,19 +57,20 @@ object TestRunner {
             flowFile = flowFile,
         )
 
-        val updatedEnv = env
-            .withInjectedShellEnvVars()
-            .withDefaultEnvVars(flowFile)
+        val updatedEnv = env.withInjectedShellEnvVars().withDefaultEnvVars(flowFile)
 
         val result = runCatching(resultView, maestro) {
-            val commands = YamlCommandReader.readCommands(flowFile.toPath())
-                .withEnv(updatedEnv)
+            val commands = YamlCommandReader.readCommands(flowFile.toPath()).withEnv(updatedEnv)
 
             val flowName = YamlCommandReader.getConfig(commands)?.name
             if (flowName != null) {
                 aiOutput = aiOutput.copy(flowName = flowName)
             }
-
+            if (maestro.driver is AppiumDriver) {
+                val testName = flowName?.replace(".maestro/","")?: flowFile.nameWithoutExtension
+                val platform = device?.description?.split(',')?.get(0)?: "unknown"
+                (maestro.driver as AppiumDriver).setTestName("${testName} [${platform}]")
+            }
             MaestroCommandRunner.runCommands(
                 flowName = flowName ?: flowFile.nameWithoutExtension,
                 maestro = maestro,
@@ -100,6 +102,9 @@ object TestRunner {
             }
         }
 
+        if (maestro.driver is AppiumDriver) {
+            (maestro.driver as AppiumDriver).setTestStatus(if (result.get() == true) 1 else 0, exception?.message ?: "")
+        }
         return if (result.get() == true) 0 else 1
     }
 
@@ -114,7 +119,9 @@ object TestRunner {
         analyze: Boolean = false,
         apiKey: String? = null,
     ): Nothing {
-        val resultView = AnsiResultView("> Press [ENTER] to restart the Flow\n\n", useEmojis = !EnvUtils.isWindows())
+        val resultView = AnsiResultView(
+            "> Press [ENTER] to restart the Flow\n\n", useEmojis = !EnvUtils.isWindows()
+        )
 
         val fileWatcher = FileWatcher()
 
@@ -128,13 +135,9 @@ object TestRunner {
                     join()
                 }
 
-                val updatedEnv = env
-                    .withInjectedShellEnvVars()
-                    .withDefaultEnvVars(flowFile)
+                val updatedEnv = env.withInjectedShellEnvVars().withDefaultEnvVars(flowFile)
 
-                val commands = YamlCommandReader
-                    .readCommands(flowFile.toPath())
-                    .withEnv(updatedEnv)
+                val commands = YamlCommandReader.readCommands(flowFile.toPath()).withEnv(updatedEnv)
 
                 val flowName = YamlCommandReader.getConfig(commands)?.name
 
@@ -164,13 +167,14 @@ object TestRunner {
                 }
 
                 YamlCommandReader.getWatchFiles(flowFile.toPath())
-            }
-                .onFailure {
+            }.onFailure {
                     previousCommands = null
-                }
-                .getOr(listOf(flowFile.toPath()))
+                }.getOr(listOf(flowFile.toPath()))
 
-            if (CliWatcher.waitForFileChangeOrEnter(fileWatcher, watchFiles) == CliWatcher.SignalType.ENTER) {
+            if (CliWatcher.waitForFileChangeOrEnter(
+                    fileWatcher, watchFiles
+                ) == CliWatcher.SignalType.ENTER
+            ) {
                 // On ENTER force re-run of flow even if commands have not changed
                 previousCommands = null
             }

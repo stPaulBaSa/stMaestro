@@ -30,6 +30,7 @@ object PickDeviceInteractor {
                 if (result is Device.AvailableForLaunch) {
                     when (result.platform) {
                         Platform.ANDROID -> PrintUtils.message("Launching Android emulator...")
+                        Platform.APPIUM -> PrintUtils.message("Launching Appium server...")
                         Platform.IOS -> PrintUtils.message("Launching iOS simulator...")
                         Platform.WEB -> PrintUtils.message("Launching ${result.description}")
                     }
