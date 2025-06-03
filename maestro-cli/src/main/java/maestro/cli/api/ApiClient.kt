@@ -677,10 +677,10 @@ data class CliVersion(
 
         fun parse(versionString: String): CliVersion? {
             val parts = versionString.split('.')
-            if (parts.size != 3) return null
-            val major = parts[0].toIntOrNull() ?: return null
-            val minor = parts[1].toIntOrNull() ?: return null
-            val patch = parts[2].toIntOrNull() ?: return null
+            if (parts.size != 4) return null
+            val major = parts[1].toIntOrNull() ?: return null
+            val minor = parts[2].toIntOrNull() ?: return null
+            val patch = parts[3].toIntOrNull() ?: return null
             return CliVersion(major, minor, patch)
         }
     }

@@ -1,5 +1,7 @@
 package maestro.device
 
+import com.google.gson.JsonObject
+import com.google.gson.JsonParser
 import dadb.Dadb
 import dadb.adbserver.AdbServer
 import maestro.device.util.AndroidEnvUtils
@@ -13,7 +15,7 @@ import okio.source
 import org.slf4j.LoggerFactory
 import util.DeviceCtlResponse
 import java.io.File
-import java.util.*
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 
@@ -108,6 +110,62 @@ object DeviceService {
                 )
             }
 
+            Platform.APPIUM -> {
+                // TODO: to be implemented
+                val emulatorBinary = requireEmulatorBinary()
+
+                ProcessBuilder(
+                    emulatorBinary.absolutePath,
+                    "-avd",
+                    device.modelId,
+                    "-netdelay",
+                    "none",
+                    "-netspeed",
+                    "full"
+                ).start().waitFor(10,TimeUnit.SECONDS)
+
+                val dadb = MaestroTimer.withTimeout(60000) {
+                    try {
+                        Dadb.list().lastOrNull{ dadb ->
+                            !connectedDevices.contains(dadb.toString())
+                        }
+                    } catch (ignored: Exception) {
+                        Thread.sleep(100)
+                        null
+                    }
+                } ?: throw DeviceError("Unable to start device: ${device.modelId}")
+
+                PrintUtils.message("Waiting for emulator ( ${device.modelId} ) to boot...")
+                while (!bootComplete(dadb)) {
+                    Thread.sleep(1000)
+                }
+
+                if (device.language != null && device.country != null) {
+                    PrintUtils.message("Setting the device locale to ${device.language}_${device.country}...")
+                    val driver = AndroidDriver(dadb, driverHostPort)
+                    driver.installMaestroDriverApp()
+                    val result = driver.setDeviceLocale(
+                        country = device.country,
+                        language = device.language
+                    )
+
+                    when (result) {
+                        SET_LOCALE_RESULT_SUCCESS -> PrintUtils.message("[Done] Setting the device locale to ${device.language}_${device.country}")
+                        SET_LOCALE_RESULT_LOCALE_NOT_VALID -> throw IllegalStateException("Failed to set locale ${device.language}_${device.country}, the locale is not valid for a chosen device")
+                        SET_LOCALE_RESULT_UPDATE_CONFIGURATION_FAILED -> throw IllegalStateException("Failed to set locale ${device.language}_${device.country}, exception during updating configuration occurred")
+                        else -> throw IllegalStateException("Failed to set locale ${device.language}_${device.country}, unknown exception happened")
+                    }
+                    driver.uninstallMaestroDriverApp()
+                }
+
+                return Device.Connected(
+                    instanceId = dadb.toString(),
+                    description = device.description,
+                    platform = device.platform,
+                    deviceType = device.deviceType,
+                )
+            }
+
             Platform.WEB -> {
                 return Device.Connected(
                     instanceId = "",
@@ -136,9 +194,10 @@ object DeviceService {
             .filterIsInstance<Device.AvailableForLaunch>()
     }
 
-     fun listDevices(includeWeb: Boolean, host: String? = null, port: Int? = null): List<Device> {
+    fun listDevices(includeWeb: Boolean, host: String? = null, port: Int? = null): List<Device> {
         return listAndroidDevices(host, port) +
                 listIOSDevices() +
+                listAppiumDevices() +
                 if (includeWeb) {
                     listWebDevices()
                 } else {
@@ -183,11 +242,12 @@ object DeviceService {
                 val avdName = runCatching {
                     dadb.shell("getprop ro.kernel.qemu").output.trim().let { qemuProp ->
                         if (qemuProp == "1") {
-                            val avdNameResult = ProcessBuilder("adb", "-s", dadb.toString(), "emu", "avd", "name")
-                                .redirectErrorStream(true)
-                                .start()
-                                .apply { waitFor(5, TimeUnit.SECONDS) }
-                                .inputStream.bufferedReader().readLine()?.trim() ?: ""
+                            val avdNameResult =
+                                ProcessBuilder("adb", "-s", dadb.toString(), "emu", "avd", "name")
+                                    .redirectErrorStream(true)
+                                    .start()
+                                    .apply { waitFor(5, TimeUnit.SECONDS) }
+                                    .inputStream.bufferedReader().readLine()?.trim() ?: ""
 
                             if (avdNameResult.isNotBlank() && !avdNameResult.contains("unknown AVD")) {
                                 avdNameResult
@@ -197,7 +257,7 @@ object DeviceService {
                 }.getOrNull()
 
                 val instanceId = dadb.toString()
-                val deviceType = when  {
+                val deviceType = when {
                     instanceId.startsWith("emulator") -> Device.DeviceType.EMULATOR
                     else -> Device.DeviceType.REAL
                 }
@@ -237,6 +297,32 @@ object DeviceService {
         }
 
         return connected + avds
+    }
+
+
+    private fun listAppiumDevices(): List<Device> {
+        val userDir = System.getProperty("user.dir")
+        val pathFile = "$userDir/.maestro/AppiumCapabilities.json"
+        val jsonString = File(pathFile).readText()
+        val jsonObject: JsonObject = JsonParser.parseString(jsonString) as JsonObject
+        val capsDevices = jsonObject.getAsJsonArray("devices")
+        val enabledDevices = capsDevices.filter { it.asJsonObject.get("enabled").asBoolean }
+
+        val appiumDevices = enabledDevices.map {
+            val platformName = it.asJsonObject.get("platformName").asString
+            val deviceName = it.asJsonObject.get("deviceName").asString
+            val platformVersion = it.asJsonObject.get("platformVersion").asString
+            val isRealMobile = it.asJsonObject.get("isRealMobile").asBoolean
+            val deviceType =
+                if (isRealMobile) Device.DeviceType.REAL else Device.DeviceType.SIMULATOR
+            Device.Connected(
+                instanceId = "$platformName, $deviceName, $platformVersion",
+                description = "$platformName, $deviceName, $platformVersion",
+                platform = Platform.APPIUM,
+                deviceType = deviceType
+            )
+        }
+        return appiumDevices
     }
 
     private fun listIOSDevices(): List<Device> {
@@ -305,7 +391,7 @@ object DeviceService {
                 platform = Platform.IOS,
                 language = null,
                 country = null,
-                deviceType =  Device.DeviceType.SIMULATOR
+                deviceType = Device.DeviceType.SIMULATOR
             )
         }
     }
@@ -330,7 +416,12 @@ object DeviceService {
                             deviceType = Device.DeviceType.EMULATOR
                         )
                     }
-                    .find { connectedDevice -> connectedDevice.description.contains(deviceName, ignoreCase = true) }
+                    .find { connectedDevice ->
+                        connectedDevice.description.contains(
+                            deviceName,
+                            ignoreCase = true
+                        )
+                    }
             }.getOrNull()
         }
     }
@@ -338,7 +429,10 @@ object DeviceService {
     /**
      * @return true if ios simulator or android emulator is available to launch
      */
-    fun isDeviceAvailableToLaunch(deviceName: String, platform: Platform): Device.AvailableForLaunch? {
+    fun isDeviceAvailableToLaunch(
+        deviceName: String,
+        platform: Platform
+    ): Device.AvailableForLaunch? {
         return if (platform == Platform.IOS) {
             listIOSDevices()
                 .filterIsInstance<Device.AvailableForLaunch>()
@@ -605,9 +699,11 @@ object DeviceService {
 
     private fun requireEmulatorBinary(): File = AndroidEnvUtils.requireEmulatorBinary()
 
-    private fun requireAvdManagerBinary(): File = AndroidEnvUtils.requireCommandLineTools("avdmanager")
+    private fun requireAvdManagerBinary(): File =
+        AndroidEnvUtils.requireCommandLineTools("avdmanager")
 
-    private fun requireSdkManagerBinary(): File = AndroidEnvUtils.requireCommandLineTools("sdkmanager")
+    private fun requireSdkManagerBinary(): File =
+        AndroidEnvUtils.requireCommandLineTools("sdkmanager")
 
     private const val SET_LOCALE_RESULT_SUCCESS = 0
     private const val SET_LOCALE_RESULT_LOCALE_NOT_VALID = 1

@@ -80,6 +80,13 @@ dependencies {
     implementation(libs.skiko.linux.x64)
     implementation(libs.skiko.windows.arm64)
     implementation(libs.skiko.windows.x64)
+    implementation(libs.java.client)
+    implementation(libs.selenium)
+    implementation(libs.selenium.devtools)
+    api(libs.slf4j)
+    api(libs.logback) {
+        exclude(group = "org.slf4j", module = "slf4j-api")
+    }
 
     testImplementation(libs.junit.jupiter.api)
     testRuntimeOnly(libs.junit.jupiter.engine)

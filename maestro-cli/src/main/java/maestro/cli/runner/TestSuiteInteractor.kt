@@ -1,5 +1,6 @@
 package maestro.cli.runner
 
+import io.appium.java_client.android.AndroidDriver
 import maestro.Maestro
 import maestro.MaestroException
 import maestro.cli.CliError
@@ -28,6 +29,7 @@ import java.nio.file.Path
 import kotlin.system.measureTimeMillis
 import kotlin.time.Duration.Companion.seconds
 import maestro.cli.util.ScreenshotUtils
+import maestro.drivers.AppiumDriver
 import maestro.orchestra.util.Env.withDefaultEnvVars
 import maestro.orchestra.util.Env.withInjectedShellEnvVars
 
@@ -69,9 +71,7 @@ class TestSuiteInteractor(
         val flowSequence = executionPlan.sequence
         for (flow in flowSequence.flows) {
             val flowFile = flow.toFile()
-            val updatedEnv = env
-                .withInjectedShellEnvVars()
-                .withDefaultEnvVars(flowFile)
+            val updatedEnv = env.withInjectedShellEnvVars().withDefaultEnvVars(flowFile)
             val (result, aiOutput) = runFlow(flowFile, updatedEnv, maestro, debugOutputPath)
             flowResults.add(result)
             aiOutputs.add(aiOutput)
@@ -89,18 +89,23 @@ class TestSuiteInteractor(
         // proceed to run all other Flows
         executionPlan.flowsToRun.forEach { flow ->
             val flowFile = flow.toFile()
-            val updatedEnv = env
-                .withInjectedShellEnvVars()
-                .withDefaultEnvVars(flowFile)
+            val updatedEnv = env.withInjectedShellEnvVars().withDefaultEnvVars(flowFile)
             val (result, aiOutput) = runFlow(flowFile, updatedEnv, maestro, debugOutputPath)
             aiOutputs.add(aiOutput)
 
             if (result.status == FlowStatus.ERROR) {
                 passed = false
+                if (maestro.driver is AppiumDriver) {
+                    val currentPackageId = (maestro.driver as AppiumDriver).currentPackage()
+                    if (currentPackageId != null) {
+                        maestro.driver.stopApp(currentPackageId)
+                        Thread.sleep(1000)
+                        maestro.driver.launchApp(currentPackageId, emptyMap())
+                    }
+                }
             }
             flowResults.add(result)
         }
-
 
         val suiteDuration = flowResults.sumOf { it.duration?.inWholeSeconds ?: 0 }.seconds
 
@@ -109,16 +114,14 @@ class TestSuiteInteractor(
                 status = if (passed) FlowStatus.SUCCESS else FlowStatus.ERROR,
                 duration = suiteDuration,
                 shardIndex = shardIndex,
-                flows = flowResults
-                    .map {
-                        TestSuiteViewModel.FlowResult(
-                            name = it.name,
-                            status = it.status,
-                            duration = it.duration,
-                        )
-                    },
-            ),
-            uploadUrl = ""
+                flows = flowResults.map {
+                    TestSuiteViewModel.FlowResult(
+                        name = it.name,
+                        status = it.status,
+                        duration = it.duration,
+                    )
+                },
+            ), uploadUrl = ""
         )
 
         val summary = TestExecutionSummary(
@@ -145,14 +148,22 @@ class TestSuiteInteractor(
         // TODO(bartekpacia): Should it also be saving to debugOutputPath?
         TestDebugReporter.saveSuggestions(aiOutputs, debugOutputPath)
 
+        if (maestro.driver is AppiumDriver) {
+            val testMessageResult =
+                flowResults.filter { it.status != FlowStatus.SUCCESS }.joinToString("\n") {
+                    val message = it.failure?.message ?: ""
+                    "${it.name} [${it.status}]: ${message}"
+                }
+            (maestro.driver as AppiumDriver).setTestStatus(
+                if (passed) 1 else 0, testMessageResult
+            )
+            maestro.close()
+        }
         return summary
     }
 
     private fun runFlow(
-        flowFile: File,
-        env: Map<String, String>,
-        maestro: Maestro,
-        debugOutputPath: Path
+        flowFile: File, env: Map<String, String>, maestro: Maestro, debugOutputPath: Path
     ): Pair<TestExecutionSummary.FlowResult, FlowAIOutput> {
         // TODO(bartekpacia): merge TestExecutionSummary with AI suggestions
         //  (i.e. consider them also part of the test output)
@@ -170,69 +181,65 @@ class TestSuiteInteractor(
 
         val flowTimeMillis = measureTimeMillis {
             try {
-                val commands = YamlCommandReader
-                    .readCommands(flowFile.toPath())
-                    .withEnv(env)
+                val commands = YamlCommandReader.readCommands(flowFile.toPath()).withEnv(env)
 
                 YamlCommandReader.getConfig(commands)?.name?.let { flowName = it }
-
-                val orchestra = Orchestra(
-                    maestro = maestro,
-                    onCommandStart = { _, command ->
-                        logger.info("${shardPrefix}${command.description()} RUNNING")
-                        debugOutput.commands[command] = CommandDebugMetadata(
-                            timestamp = System.currentTimeMillis(),
-                            status = CommandStatus.RUNNING
-                        )
-                    },
-                    onCommandComplete = { _, command ->
-                        logger.info("${shardPrefix}${command.description()} COMPLETED")
-                        debugOutput.commands[command]?.let {
-                            it.status = CommandStatus.COMPLETED
-                            it.calculateDuration()
-                        }
-                    },
-                    onCommandFailed = { _, command, e ->
-                        logger.info("${shardPrefix}${command.description()} FAILED")
-                        if (e is MaestroException) debugOutput.exception = e
-                        debugOutput.commands[command]?.let {
-                            it.status = CommandStatus.FAILED
-                            it.calculateDuration()
-                            it.error = e
-                        }
-
-                        ScreenshotUtils.takeDebugScreenshot(maestro, debugOutput, CommandStatus.FAILED)
-                        Orchestra.ErrorResolution.FAIL
-                    },
-                    onCommandSkipped = { _, command ->
-                        logger.info("${shardPrefix}${command.description()} SKIPPED")
-                        debugOutput.commands[command]?.let {
-                            it.status = CommandStatus.SKIPPED
-                        }
-                    },
-                    onCommandWarned = { _, command ->
-                        logger.info("${shardPrefix}${command.description()} WARNED")
-                        debugOutput.commands[command]?.apply {
-                            status = CommandStatus.WARNED
-                        }
-                    },
-                    onCommandReset = { command ->
-                        logger.info("${shardPrefix}${command.description()} PENDING")
-                        debugOutput.commands[command]?.let {
-                            it.status = CommandStatus.PENDING
-                        }
-                    },
-                    onCommandGeneratedOutput = { command, defects, screenshot ->
-                        logger.info("${shardPrefix}${command.description()} generated output")
-                        val screenshotPath = ScreenshotUtils.writeAIscreenshot(screenshot)
-                        aiOutput.screenOutputs.add(
-                            SingleScreenFlowAIOutput(
-                                screenshotPath = screenshotPath,
-                                defects = defects,
-                            )
-                        )
+                val tags = YamlCommandReader.getConfig(commands)?.tags
+                if (maestro.driver is AppiumDriver) {
+                    (maestro.driver as AppiumDriver).setSingleStartTestName(flowName)
+                    if (tags != null) {
+                        (maestro.driver as AppiumDriver).setTestTags(tags)
                     }
-                )
+                }
+                val orchestra = Orchestra(maestro = maestro, onCommandStart = { _, command ->
+                    logger.info("${shardPrefix}${command.description()} RUNNING")
+                    debugOutput.commands[command] = CommandDebugMetadata(
+                        timestamp = System.currentTimeMillis(), status = CommandStatus.RUNNING
+                    )
+                }, onCommandComplete = { _, command ->
+                    logger.info("${shardPrefix}${command.description()} COMPLETED")
+                    debugOutput.commands[command]?.let {
+                        it.status = CommandStatus.COMPLETED
+                        it.calculateDuration()
+                    }
+                }, onCommandFailed = { _, command, e ->
+                    logger.info("${shardPrefix}${command.description()} FAILED")
+                    if (e is MaestroException) debugOutput.exception = e
+                    debugOutput.commands[command]?.let {
+                        it.status = CommandStatus.FAILED
+                        it.calculateDuration()
+                        it.error = e
+                    }
+
+                    ScreenshotUtils.takeDebugScreenshot(
+                        maestro, debugOutput, CommandStatus.FAILED
+                    )
+                    Orchestra.ErrorResolution.FAIL
+                }, onCommandSkipped = { _, command ->
+                    logger.info("${shardPrefix}${command.description()} SKIPPED")
+                    debugOutput.commands[command]?.let {
+                        it.status = CommandStatus.SKIPPED
+                    }
+                }, onCommandWarned = { _, command ->
+                    logger.info("${shardPrefix}${command.description()} WARNED")
+                    debugOutput.commands[command]?.apply {
+                        status = CommandStatus.WARNED
+                    }
+                }, onCommandReset = { command ->
+                    logger.info("${shardPrefix}${command.description()} PENDING")
+                    debugOutput.commands[command]?.let {
+                        it.status = CommandStatus.PENDING
+                    }
+                }, onCommandGeneratedOutput = { command, defects, screenshot ->
+                    logger.info("${shardPrefix}${command.description()} generated output")
+                    val screenshotPath = ScreenshotUtils.writeAIscreenshot(screenshot)
+                    aiOutput.screenOutputs.add(
+                        SingleScreenFlowAIOutput(
+                            screenshotPath = screenshotPath,
+                            defects = defects,
+                        )
+                    )
+                })
 
                 val flowSuccess = orchestra.runFlow(commands)
                 flowStatus = if (flowSuccess) FlowStatus.SUCCESS else FlowStatus.ERROR
@@ -244,6 +251,9 @@ class TestSuiteInteractor(
         }
         val flowDuration = TimeUtils.durationInSeconds(flowTimeMillis)
 
+        if (maestro.driver is AppiumDriver) {
+            (maestro.driver as AppiumDriver).setSingleEndTestName(flowName)
+        }
         TestDebugReporter.saveFlow(
             flowName = flowName,
             debugOutput = debugOutput,
@@ -269,7 +279,8 @@ class TestSuiteInteractor(
                 status = flowStatus,
                 failure = if (flowStatus == FlowStatus.ERROR) {
                     TestExecutionSummary.Failure(
-                        message = shardPrefix + (errorMessage ?: debugOutput.exception?.message ?: "Unknown error"),
+                        message = shardPrefix + (errorMessage ?: debugOutput.exception?.message
+                        ?: "Unknown error"),
                     )
                 } else null,
                 duration = flowDuration,

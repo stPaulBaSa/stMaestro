@@ -63,3 +63,49 @@ data class DeviceConfigAndroid(
         }
     }
 }
+
+data class DeviceConfigAppium(
+    val deviceName: String,
+    val device: String,
+    val tag: String,
+    val systemImage: String,
+    val abi: String
+) {
+    companion object {
+        val versions = listOf(34, 33, 31, 30, 29, 28)
+        val defaultVersion = 30
+
+        fun createConfig(version: Int, device: AvdDevice, architecture: CPU_ARCHITECTURE): DeviceConfigAndroid {
+            val name = "Maestro_${device.name.replace(" ", "_")}_API_${version}"
+            val tag = "google_apis"
+            val systemImage = when (architecture) {
+                CPU_ARCHITECTURE.x86_64 -> "x86_64"
+                CPU_ARCHITECTURE.ARM64 -> "arm64-v8a"
+                else -> throw IllegalStateException("Unsupported architecture $architecture")
+            }.let {
+                "system-images;android-$version;google_apis;$it"
+            }
+            val abi = when (architecture) {
+                CPU_ARCHITECTURE.x86_64 -> "x86_64"
+                CPU_ARCHITECTURE.ARM64 -> "arm64-v8a"
+                else -> throw IllegalStateException("Unsupported architecture $architecture")
+            }
+
+            return DeviceConfigAndroid(
+                deviceName = name,
+                device = device.nameId,
+                tag = tag,
+                systemImage = systemImage,
+                abi = abi
+            )
+        }
+
+        fun choosePixelDevice(devices: List<AvdDevice>): AvdDevice? {
+            return devices.find { it.nameId == "pixel_6" } ?:
+            devices.find { it.nameId == "pixel_6_pro" } ?:
+            devices.find { it.nameId == "pixel_5" } ?:
+            devices.find { it.nameId == "pixel_4" } ?:
+            devices.find { it.nameId == "pixel" }
+        }
+    }
+}
